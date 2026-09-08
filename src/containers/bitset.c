@@ -760,7 +760,7 @@ SCALAR_BITSET_CONTAINER_FN(andnot, &~, _mm256_andnot_si256, vbicq_u64)
     }                                                                          \
   }
 
-#else // CROARING_COMPILER_SUPPORTS_AVX512
+#else //  CROARING_COMPILER_SUPPORTS_AVX512
 
 
 #define CROARING_BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)   \
@@ -793,7 +793,7 @@ SCALAR_BITSET_CONTAINER_FN(andnot, &~, _mm256_andnot_si256, vbicq_u64)
 
 #endif //  CROARING_COMPILER_SUPPORTS_AVX512
 
-#elif defined(CROARING_USENEON)
+#elif defined(CROARING_USENEON) // CROARING_IS_X64
 
 #define CROARING_BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)  \
 int bitset_container_##opname(const bitset_container_t *src_1,                \
@@ -881,7 +881,7 @@ int bitset_container_##opname##_justcard(const bitset_container_t *src_1,     \
     return vgetq_lane_u64(n, 0) + vgetq_lane_u64(n, 1);                       \
 }
 
-#else
+#else // CROARING_IS_X64
 
 #define CROARING_BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)  \
 int bitset_container_##opname(const bitset_container_t *src_1,            \
@@ -930,12 +930,89 @@ int bitset_container_##opname##_justcard(const bitset_container_t *src_1, \
 
 #endif // CROARING_IS_X64
 
+#if defined(CROARING_USERVV)
+
+#define CROARING_RVV_BITSET_CONTAINER_AND_FN()
+int bitset_container_and(const bitset_container_t *src_1,
+                         const bitset_container_t *src_2,
+                         bitset_container_t *dst){
+    const uint64_t *__restrict__ words_1 = src_1->words;
+    const uint64_t *__restrict__ words_2 = src_2->words;  
+    uint64_t *out = dst->words;
+    int32_t sum=0;
+    for(size_t i=0 ; i<BITSET_CONTAINER_SIZE_IN_WORDS; i+=2){
+        uint64_t word_1 = words_1[i] & words_2[i];                        \
+        uint64_t word_2 = words_1[i + 1] & words_2[i + 1];                \
+        out[i] = word_1;                                                  \
+        out[i + 1] = word_2;                                              \
+        sum += roaring_hamming(word_1);                                   \
+        sum += roaring_hamming(word_2);
+    }
+    dst->cardinality = sum;                                               \
+    return dst->cardinality;              
+}
+
+
+int bitset_container_and_nocard(const bitset_container_t *src1,
+                                const bitset_container_t *src2,
+                                bitset_container_t *dst)      
+{
+    const uint64_t *__restrict__ words_1 = src1->words;                 \
+    const uint64_t *__restrict__ words_2 = src2->words;                 \
+    uint64_t *__restrict__ out = dst->words;                              \
+                                                                          \
+    size_t n = BITSET_CONTAINER_SIZE_IN_WORDS;                            \
+                                                                          \
+    while (n != 0) {                                                      \
+        size_t vl = __riscv_vsetvl_e64m1(n);                              \
+                                                                          \
+        vuint64m1_t va =                                                  \
+            __riscv_vle64_v_u64m1(words_1, vl);                          \
+        vuint64m1_t vb =                                                  \
+            __riscv_vle64_v_u64m1(words_2, vl);                          \
+                                                                          \
+        vuint64m1_t vr =                                                  \
+            __riscv_vand_vv_u64m1(va, vb, vl);                           \
+                                                                          \
+        __riscv_vse64_v_u64m1(out, vr, vl);                              \
+                                                                          \
+        words_1 += vl;                                                     \
+        words_2 += vl;                                                     \
+        out += vl;                                                         \
+        n -= vl;                                                           \
+    }                                                                     \
+                                                                          \
+    dst->cardinality = BITSET_UNKNOWN_CARDINALITY;                        \
+    return dst->cardinality;
+}
+
+int bitset_container_and_justcard(const bitset_container_t *src_1,        \
+                                  const bitset_container_t *src_2) {      \
+    const uint64_t *__restrict__ words_1 = src_1->words;                 \
+    const uint64_t *__restrict__ words_2 = src_2->words;                 \
+    int32_t sum = 0;                                                      \
+    for (size_t i = 0; i < BITSET_CONTAINER_SIZE_IN_WORDS; i += 2) {     \
+        uint64_t word_1 = words_1[i] & words_2[i];                        \
+        uint64_t word_2 = words_1[i + 1] & words_2[i + 1];                \
+        sum += roaring_hamming(word_1);                                   \
+        sum += roaring_hamming(word_2);                                   \
+    }                                                                     \
+    return sum;                                                           \
+}
+
+#endif
+
 // we duplicate the function because other containers use the "or" term, makes API more consistent
 CROARING_BITSET_CONTAINER_FN(or,    |, _mm256_or_si256, vorrq_u64)
 CROARING_BITSET_CONTAINER_FN(union, |, _mm256_or_si256, vorrq_u64)
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
+#if defined(CROARING_USERVV)
+CROARING_RVV_BITSET_CONTAINER_AND_FN()
+#else
 CROARING_BITSET_CONTAINER_FN(and,          &, _mm256_and_si256, vandq_u64)
+#endif
+
 CROARING_BITSET_CONTAINER_FN(intersection, &, _mm256_and_si256, vandq_u64)
 
 CROARING_BITSET_CONTAINER_FN(xor,    ^,  _mm256_xor_si256,    veorq_u64)

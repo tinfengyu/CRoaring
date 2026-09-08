@@ -26,7 +26,8 @@ function(add_c_test TEST_NAME)
     target_link_libraries(${TEST_NAME} roaring cmocka)
   endif()
 
-  add_test(${TEST_NAME} ${TEST_NAME})
+  add_test(NAME ${TEST_NAME} 
+	   COMMAND ${TEST_NAME})
 endfunction(add_c_test)
 
 
@@ -48,7 +49,8 @@ if (CMAKE_VERSION VERSION_GREATER 2.8.10)
       target_link_libraries(${TEST_NAME} roaring cmocka)
     endif()
 
-    add_test(${TEST_NAME} ${TEST_NAME})
+    add_test(NAME ${TEST_NAME}
+	     COMMAND ${TEST_NAME})
   endfunction(add_cpp_test)
 else()
   function(add_cpp_test TEST_NAME)

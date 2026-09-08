@@ -152,7 +152,8 @@ if(ENABLE_ROARING_TESTS AND BASH AND NOT EMSCRIPTEN)
 
   add_executable(amalgamate_demo $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/amalgamation_demo.c>)
   target_link_libraries(amalgamate_demo croaring-singleheader-include-source)
-  add_test(amalgamate_demo amalgamate_demo)
+  add_test(NAME amalgamate_demo 
+           COMMAND amalgamate_demo)
 
   add_library(croaring-singleheader-source-lib $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/roaring.c>)
   set_target_properties(croaring-singleheader-source-lib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS YES)
@@ -165,7 +166,8 @@ if(ENABLE_ROARING_TESTS AND BASH AND NOT EMSCRIPTEN)
   else()
     target_compile_definitions(amalgamate_demo_cpp PUBLIC ROARING_EXCEPTIONS=0)
   endif()
-  add_test(amalgamate_demo_cpp amalgamate_demo_cpp)
+  add_test(NAME amalgamate_demo_cpp 
+           COMMAND amalgamate_demo_cpp)
 else()
   message(STATUS "Amalgamation tests disabled")
 endif()
