@@ -323,6 +323,36 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     return vgetq_lane_u64(n, 0) + vgetq_lane_u64(n, 1);
 }
 
+
+#elif defined(CROARING_USERVV)
+int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
+    const uint64_t *words = bitset->words;
+    const uint8_t *p = (const uint8_t *)words;
+
+    size_t bits_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * 64;
+    size_t vlmax =__riscv_vsetvlmax_e8m8();
+    uint64_t sum = 0;
+
+    while (bits_remaining != 0) {
+        size_t avl =
+          bits_remaining < vlmax ? bits_remaining : vlmax;
+
+        size_t vl =
+            __riscv_vsetvl_e8m8(avl);
+
+        vbool1_t mask =
+            __riscv_vlm_v_b1(p, vl);
+
+        sum +=
+            __riscv_vcpop_m_b1(mask, vl);
+
+        p += vl / 8;
+        bits_remaining -= vl;
+    }
+
+    return sum;
+}
+
 #else  // CROARING_IS_X64
 
 /* Get the number of bits set (force computation) */
@@ -364,6 +394,23 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
         __riscv_vnot_v_u64m1((b), (vl)), \
         (vl))
 
+#define CROARING_RVV_MOP_and(ma, mb, vl) \
+    __riscv_vmand_mm_b1((ma), (mb), (vl))
+
+#define CROARING_RVV_MOP_intersection(ma, mb, vl) \
+    CROARING_RVV_MOP_and((ma), (mb), (vl))
+
+#define CROARING_RVV_MOP_or(ma, mb, vl) \
+    __riscv_vmor_mm_b1((ma), (mb), (vl))
+
+#define CROARING_RVV_MOP_union(ma, mb, vl) \
+    CROARING_RVV_MOP_or((ma), (mb), (vl))
+
+#define CROARING_RVV_MOP_xor(ma, mb, vl) \
+    __riscv_vmxor_mm_b1((ma), (mb), (vl))
+
+#define CROARING_RVV_MOP_andnot(ma, mb, vl) \
+    __riscv_vmandn_mm_b1(ma,mb,vl)
 #endif
 
 #if CROARING_IS_X64
@@ -915,18 +962,28 @@ int bitset_container_##opname(const bitset_container_t *src_1,            \
                               bitset_container_t *dst) {                  \
     const uint64_t * __restrict__ words_1 = src_1->words;                 \
     const uint64_t * __restrict__ words_2 = src_2->words;                 \
-    uint64_t *out = dst->words;                                           \
+    const uint8_t *p1 = (const uint8_t *)words_1;                    \
+    const uint8_t *p2 = (const uint8_t *)words_2;                    \
+    uint8_t *out = (uint8_t *)dst->words;                                           \
+    size_t bits_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * 64;          \
+    size_t vlmax =__riscv_vsetvlmax_e8m8();                               \
     int32_t sum = 0;                                                      \
-    for (size_t i = 0; i < BITSET_CONTAINER_SIZE_IN_WORDS; i += 2) {      \
-        const uint64_t word_1 = (words_1[i])opsymbol(words_2[i]),         \
-                       word_2 = (words_1[i + 1])opsymbol(words_2[i + 1]); \
-        out[i] = word_1;                                                  \
-        out[i + 1] = word_2;                                              \
-        sum += roaring_hamming(word_1);                                    \
-        sum += roaring_hamming(word_2);                                    \
-    }                                                                     \
-    dst->cardinality = sum;                                               \
-    return dst->cardinality;                                              \
+    while (bits_remaining != 0) {                                         \
+        size_t avl = bits_remaining < vlmax ? bits_remaining : vlmax;               \
+        size_t vl = __riscv_vsetvl_e8m8(avl);                             \
+        vbool1_t ma = __riscv_vlm_v_b1(p1, vl);                           \
+        vbool1_t mb = __riscv_vlm_v_b1(p2, vl);                           \
+        vbool1_t mr = CROARING_RVV_MOP_##opname(ma,mb,vl);                  \
+        sum += (int32_t)__riscv_vcpop_m_b1(mr, vl);                    \
+        __riscv_vsm_v_b1(out, mr, vl);                              \
+        size_t bytes = vl / 8;                         \
+        p1 += bytes;                                \
+        p2 += bytes;                               \
+        out += bytes;                               \
+        bits_remaining -= vl;                              \
+    }                                                 \                                          
+    dst->cardinality = sum;                        \
+    return dst->cardinality;                                             \
 }                                                                         \
                                                                          \
 int bitset_container_##opname##_nocard(const bitset_container_t *src_1,   \
@@ -964,15 +1021,28 @@ int bitset_container_##opname##_justcard(const bitset_container_t *src_1, \
                               const bitset_container_t *src_2) {          \
     const uint64_t * __restrict__ words_1 = src_1->words;                 \
     const uint64_t * __restrict__ words_2 = src_2->words;                 \
+    const uint8_t *p1 = (const uint8_t *)words_1;                    \
+    const uint8_t *p2 = (const uint8_t *)words_2;                    \
+                                             \
+    size_t bits_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * 64;          \
+    size_t vlmax =__riscv_vsetvlmax_e8m8();                               \
     int32_t sum = 0;                                                      \
-    for (size_t i = 0; i < BITSET_CONTAINER_SIZE_IN_WORDS; i += 2) {      \
-        const uint64_t word_1 = (words_1[i])opsymbol(words_2[i]),         \
-                       word_2 = (words_1[i + 1])opsymbol(words_2[i + 1]); \
-        sum += roaring_hamming(word_1);                                    \
-        sum += roaring_hamming(word_2);                                    \
-    }                                                                     \
-    return sum;                                                           \
-}                                                                         \
+    while (bits_remaining != 0) {                                         \
+        size_t avl = bits_remaining < vlmax ? bits_remaining : vlmax;               \
+        size_t vl = __riscv_vsetvl_e8m8(avl);                             \
+        vbool1_t ma = __riscv_vlm_v_b1(p1, vl);                           \
+        vbool1_t mb = __riscv_vlm_v_b1(p2, vl);                           \
+        vbool1_t mr = CROARING_RVV_MOP_##opname(ma,mb,vl);                  \
+        sum += (int32_t)__riscv_vcpop_m_b1(mr, vl);                    \
+                                    \
+        size_t bytes = vl / 8;                         \
+        p1 += bytes;                                \
+        p2 += bytes;                               \
+                                    \
+        bits_remaining -= vl;                              \
+    }                                                 \                                          
+    return sum;                                      \
+}                                                       \
 
 #else // CROARING_IS_X64
 
@@ -1025,15 +1095,15 @@ int bitset_container_##opname##_justcard(const bitset_container_t *src_1, \
 
 
 // we duplicate the function because other containers use the "or" term, makes API more consistent
-CROARING_BITSET_CONTAINER_FN(or,    |, _mm256_and_si256, vandq_u64)
+CROARING_BITSET_CONTAINER_FN(or,    |, _mm256_or_si256, vorrq_u64)
 CROARING_BITSET_CONTAINER_FN(union, |, _mm256_or_si256, vorrq_u64)
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
 CROARING_BITSET_CONTAINER_FN(and,          &, _mm256_and_si256, vandq_u64)
 CROARING_BITSET_CONTAINER_FN(intersection, &, _mm256_and_si256, vandq_u64)
 
-CROARING_BITSET_CONTAINER_FN(xor,          ^, _mm256_and_si256, vandq_u64)
-CROARING_BITSET_CONTAINER_FN(andnot,      &~, _mm256_and_si256, vandq_u64)
+CROARING_BITSET_CONTAINER_FN(xor,          ^, _mm256_xor_si256, veorq_u64)
+CROARING_BITSET_CONTAINER_FN(andnot,      &~, _mm256_andnot_si256, vbicq_u64)
 
 // clang-format On
 
