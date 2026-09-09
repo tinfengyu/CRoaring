@@ -329,27 +329,50 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     const uint64_t *words = bitset->words;
     const uint8_t *p = (const uint8_t *)words;
 
-    size_t bits_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * 64;
-    size_t vlmax =__riscv_vsetvlmax_e8m8();
-    uint64_t sum = 0;
-
-    while (bits_remaining != 0) {
-        size_t avl =
-          bits_remaining < vlmax ? bits_remaining : vlmax;
-
+    size_t bytes_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * sizeof(uint64_t);
+    size_t vlmax = __riscv_vsetvlmax_e8m4();
+    size_t vl_acc =__riscv_vsetvlmax_e16m8();
+    vuint16m8_t acc =
+        __riscv_vmv_v_x_u16m8(0, vl_acc);
+    
+    while (bytes_remaining != 0) {
         size_t vl =
-            __riscv_vsetvl_e8m8(avl);
+            __riscv_vsetvl_e8m4(bytes_remaining);
 
-        vbool1_t mask =
-            __riscv_vlm_v_b1(p, vl);
+        vuint8m4_t v =
+            __riscv_vle8_v_u8m4(p, vl);
 
-        sum +=
-            __riscv_vcpop_m_b1(mask, vl);
+        vuint8m4_t t;
 
-        p += vl / 8;
-        bits_remaining -= vl;
+        t = __riscv_vsrl_vx_u8m4(v, 1, vl);
+        t = __riscv_vand_vx_u8m4(t, 0x55, vl);
+        v = __riscv_vsub_vv_u8m4(v, t, vl);
+
+        t = __riscv_vsrl_vx_u8m4(v, 2, vl);
+        t = __riscv_vand_vx_u8m4(t, 0x33, vl);
+
+        v = __riscv_vand_vx_u8m4(v, 0x33, vl);
+        v = __riscv_vadd_vv_u8m4(v, t, vl);
+
+        t = __riscv_vsrl_vx_u8m4(v, 4, vl);
+        v = __riscv_vadd_vv_u8m4(v, t, vl);
+        v = __riscv_vand_vx_u8m4(v, 0x0f, vl);
+
+        acc =
+            __riscv_vwaddu_wv_u16m8_tu(
+                acc, acc, v, vl);
+
+        p += vl;
+        bytes_remaining -= vl;
     }
+    vuint32m1_t zero =
+        __riscv_vmv_v_x_u32m1(0, 1);
 
+    vuint32m1_t reduced =
+        __riscv_vwredsumu_vs_u16m8_u32m1(acc, zero, vl_acc);
+
+    uint32_t sum =
+        __riscv_vmv_x_s_u32m1_u32(reduced);
     return sum;
 }
 
@@ -394,23 +417,26 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
         __riscv_vnot_v_u64m1((b), (vl)), \
         (vl))
 
-#define CROARING_RVV_MOP_and(ma, mb, vl) \
-    __riscv_vmand_mm_b1((ma), (mb), (vl))
+#define CROARING_RVV_VOP_and(a, b, vl) \
+    __riscv_vand_vv_u8m4((a), (b), (vl))
 
-#define CROARING_RVV_MOP_intersection(ma, mb, vl) \
-    CROARING_RVV_MOP_and((ma), (mb), (vl))
+#define CROARING_RVV_VOP_intersection(a, b, vl) \
+    CROARING_RVV_VOP_and((a), (b), (vl))
 
-#define CROARING_RVV_MOP_or(ma, mb, vl) \
-    __riscv_vmor_mm_b1((ma), (mb), (vl))
+#define CROARING_RVV_VOP_or(a, b, vl) \
+    __riscv_vor_vv_u8m4((a), (b), (vl))
 
-#define CROARING_RVV_MOP_union(ma, mb, vl) \
-    CROARING_RVV_MOP_or((ma), (mb), (vl))
+    
+#define CROARING_RVV_VOP_union(a, b, vl) \
+    CROARING_RVV_VOP_or((a), (b), (vl))
 
-#define CROARING_RVV_MOP_xor(ma, mb, vl) \
-    __riscv_vmxor_mm_b1((ma), (mb), (vl))
-
-#define CROARING_RVV_MOP_andnot(ma, mb, vl) \
-    __riscv_vmandn_mm_b1(ma,mb,vl)
+#define CROARING_RVV_VOP_xor(a, b, vl) \
+    __riscv_vxor_vv_u8m4((a), (b), (vl))
+#define CROARING_RVV_VOP_andnot(a, b, vl)                          \
+    __riscv_vand_vv_u8m4(                                         \
+        (a),                                                       \
+        __riscv_vxor_vx_u8m4((b), 0xff, (vl)),                    \
+        (vl))
 #endif
 
 #if CROARING_IS_X64
@@ -959,33 +985,78 @@ int bitset_container_##opname##_justcard(const bitset_container_t *src_1,     \
 #define CROARING_BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)  \
 int bitset_container_##opname(const bitset_container_t *src_1,            \
                               const bitset_container_t *src_2,            \
-                              bitset_container_t *dst) {                  \
-    const uint64_t * __restrict__ words_1 = src_1->words;                 \
-    const uint64_t * __restrict__ words_2 = src_2->words;                 \
-    const uint8_t *p1 = (const uint8_t *)words_1;                    \
-    const uint8_t *p2 = (const uint8_t *)words_2;                    \
-    uint8_t *out = (uint8_t *)dst->words;                                           \
-    size_t bits_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * 64;          \
-    size_t vlmax =__riscv_vsetvlmax_e8m8();                               \
-    int32_t sum = 0;                                                      \
-    while (bits_remaining != 0) {                                         \
-        size_t avl = bits_remaining < vlmax ? bits_remaining : vlmax;               \
-        size_t vl = __riscv_vsetvl_e8m8(avl);                             \
-        vbool1_t ma = __riscv_vlm_v_b1(p1, vl);                           \
-        vbool1_t mb = __riscv_vlm_v_b1(p2, vl);                           \
-        vbool1_t mr = CROARING_RVV_MOP_##opname(ma,mb,vl);                  \
-        sum += (int32_t)__riscv_vcpop_m_b1(mr, vl);                    \
-        __riscv_vsm_v_b1(out, mr, vl);                              \
-        size_t bytes = vl / 8;                         \
-        p1 += bytes;                                \
-        p2 += bytes;                               \
-        out += bytes;                               \
-        bits_remaining -= vl;                              \
-    }                                                 \                                          
-    dst->cardinality = sum;                        \
-    return dst->cardinality;                                             \
-}                                                                         \
-                                                                         \
+                              bitset_container_t *dst) {                   \
+    const uint8_t *p1 = (const uint8_t *)src_1->words;                    \
+    const uint8_t *p2 = (const uint8_t *)src_2->words;                    \
+    uint8_t *out = (uint8_t *)dst->words;                                 \
+                                                                            \
+    size_t bytes_remaining =                                               \
+        BITSET_CONTAINER_SIZE_IN_WORDS * sizeof(uint64_t);                 \
+                                                                            \
+    size_t vl_acc = __riscv_vsetvlmax_e16m8();                            \
+                                                                            \
+    vuint16m8_t acc =                                                      \
+        __riscv_vmv_v_x_u16m8(0, vl_acc);                                 \
+                                                                            \
+    while (bytes_remaining != 0) {                                        \
+        size_t vl =                                                        \
+            __riscv_vsetvl_e8m4(bytes_remaining);                          \
+                                                                            \
+        vuint8m4_t a =                                                     \
+            __riscv_vle8_v_u8m4(p1, vl);                                  \
+                                                                            \
+        vuint8m4_t b =                                                     \
+            __riscv_vle8_v_u8m4(p2, vl);                                  \
+                                                                            \
+        vuint8m4_t v =                                                     \
+            CROARING_RVV_VOP_##opname(a, b, vl);                          \
+                                                                            \
+        /* 先保存真正的位运算结果 */                                       \
+        __riscv_vse8_v_u8m4(out, v, vl);                                  \
+                                                                            \
+        vuint8m4_t t;                                                      \
+                                                                            \
+        /* 每 2 bit popcount */                                            \
+        t = __riscv_vsrl_vx_u8m4(v, 1, vl);                               \
+        t = __riscv_vand_vx_u8m4(t, 0x55, vl);                            \
+        v = __riscv_vsub_vv_u8m4(v, t, vl);                               \
+                                                                            \
+        /* 每 4 bit popcount */                                            \
+        t = __riscv_vsrl_vx_u8m4(v, 2, vl);                               \
+        t = __riscv_vand_vx_u8m4(t, 0x33, vl);                            \
+                                                                            \
+        v = __riscv_vand_vx_u8m4(v, 0x33, vl);                            \
+        v = __riscv_vadd_vv_u8m4(v, t, vl);                               \
+                                                                            \
+        /* 每 byte popcount */                                             \
+        t = __riscv_vsrl_vx_u8m4(v, 4, vl);                               \
+        v = __riscv_vadd_vv_u8m4(v, t, vl);                               \
+        v = __riscv_vand_vx_u8m4(v, 0x0f, vl);                            \
+                                                                            \
+        /* u16 accumulator += byte popcount */                             \
+        acc = __riscv_vwaddu_wv_u16m8_tu(                                 \
+            acc, acc, v, vl);                                             \
+                                                                            \
+        p1 += vl;                                                          \
+        p2 += vl;                                                          \
+        out += vl;                                                         \
+        bytes_remaining -= vl;                                            \
+    }                                                                      \
+                                                                            \
+    vuint32m1_t zero =                                                     \
+        __riscv_vmv_v_x_u32m1(0, 1);                                     \
+                                                                            \
+    vuint32m1_t reduced =                                                  \
+        __riscv_vwredsumu_vs_u16m8_u32m1(                                 \
+            acc, zero, vl_acc);                                           \
+                                                                            \
+    uint32_t sum =                                                         \
+        __riscv_vmv_x_s_u32m1_u32(reduced);                               \
+                                                                            \
+    dst->cardinality = (int32_t)sum;                                      \
+    return dst->cardinality;                                              \
+}                        \
+                                                                        \
 int bitset_container_##opname##_nocard(const bitset_container_t *src_1,   \
                                        const bitset_container_t *src_2,   \
                                        bitset_container_t *dst) {         \
@@ -1016,33 +1087,71 @@ int bitset_container_##opname##_nocard(const bitset_container_t *src_1,   \
     dst->cardinality = BITSET_UNKNOWN_CARDINALITY;                        \
     return dst->cardinality;                                            \
 }                                                                       \
-                                                                         \
-int bitset_container_##opname##_justcard(const bitset_container_t *src_1, \
-                              const bitset_container_t *src_2) {          \
-    const uint64_t * __restrict__ words_1 = src_1->words;                 \
-    const uint64_t * __restrict__ words_2 = src_2->words;                 \
-    const uint8_t *p1 = (const uint8_t *)words_1;                    \
-    const uint8_t *p2 = (const uint8_t *)words_2;                    \
-                                             \
-    size_t bits_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * 64;          \
-    size_t vlmax =__riscv_vsetvlmax_e8m8();                               \
-    int32_t sum = 0;                                                      \
-    while (bits_remaining != 0) {                                         \
-        size_t avl = bits_remaining < vlmax ? bits_remaining : vlmax;               \
-        size_t vl = __riscv_vsetvl_e8m8(avl);                             \
-        vbool1_t ma = __riscv_vlm_v_b1(p1, vl);                           \
-        vbool1_t mb = __riscv_vlm_v_b1(p2, vl);                           \
-        vbool1_t mr = CROARING_RVV_MOP_##opname(ma,mb,vl);                  \
-        sum += (int32_t)__riscv_vcpop_m_b1(mr, vl);                    \
-                                    \
-        size_t bytes = vl / 8;                         \
-        p1 += bytes;                                \
-        p2 += bytes;                               \
-                                    \
-        bits_remaining -= vl;                              \
-    }                                                 \                                          
-    return sum;                                      \
-}                                                       \
+int bitset_container_##opname##_justcard(                           \
+        const bitset_container_t *src_1,                            \
+        const bitset_container_t *src_2) {                          \
+                                                                    \
+    const uint8_t *p1 = (const uint8_t *)src_1->words;              \
+    const uint8_t *p2 = (const uint8_t *)src_2->words;              \
+                                                                    \
+    size_t bytes_remaining =                                       \
+        BITSET_CONTAINER_SIZE_IN_WORDS * sizeof(uint64_t);          \
+                                                                    \
+    size_t vl_acc = __riscv_vsetvlmax_e16m8();                     \
+                                                                    \
+    vuint16m8_t acc =                                               \
+        __riscv_vmv_v_x_u16m8(0, vl_acc);                          \
+                                                                    \
+    while (bytes_remaining != 0) {                                  \
+                                                                    \
+        size_t vl =                                                 \
+            __riscv_vsetvl_e8m4(bytes_remaining);                   \
+                                                                    \
+        vuint8m4_t a =                                              \
+            __riscv_vle8_v_u8m4(p1, vl);                           \
+        vuint8m4_t b =                                              \
+            __riscv_vle8_v_u8m4(p2, vl);                           \
+                                                                    \
+        vuint8m4_t v =                                              \
+            CROARING_RVV_VOP_##opname(a, b, vl);                   \
+                                                                    \
+        vuint8m4_t t;                                               \
+                                                                    \
+        /* 每 2 bit 的 popcount */                                  \
+        t = __riscv_vsrl_vx_u8m4(v, 1, vl);                        \
+        t = __riscv_vand_vx_u8m4(t, 0x55, vl);                     \
+        v = __riscv_vsub_vv_u8m4(v, t, vl);                        \
+                                                                    \
+        /* 每 4 bit 的 popcount */                                  \
+        t = __riscv_vsrl_vx_u8m4(v, 2, vl);                        \
+        t = __riscv_vand_vx_u8m4(t, 0x33, vl);                     \
+                                                                    \
+        v = __riscv_vand_vx_u8m4(v, 0x33, vl);                     \
+        v = __riscv_vadd_vv_u8m4(v, t, vl);                        \
+                                                                    \
+        /* 每 byte 的 popcount：结果 0~8 */                         \
+        t = __riscv_vsrl_vx_u8m4(v, 4, vl);                        \
+        v = __riscv_vadd_vv_u8m4(v, t, vl);                        \
+        v = __riscv_vand_vx_u8m4(v, 0x0f, vl);                     \
+                                                                    \
+        /* u16 accumulator += u8 popcount */                        \
+        acc = __riscv_vwaddu_wv_u16m8_tu(                          \
+            acc, acc, v, vl);                                      \
+                                                                    \
+        p1 += vl;                                                   \
+        p2 += vl;                                                   \
+        bytes_remaining -= vl;                                     \
+    }                                                               \
+                                                                    \
+    vuint32m1_t zero =                                              \
+        __riscv_vmv_v_x_u32m1(0, 1);                              \
+                                                                    \
+    vuint32m1_t reduced =                                           \
+        __riscv_vwredsumu_vs_u16m8_u32m1(                          \
+            acc, zero, vl_acc);                                    \
+                                                                    \
+    return (int)__riscv_vmv_x_s_u32m1_u32(reduced);                \
+}                                            \
 
 #else // CROARING_IS_X64
 
