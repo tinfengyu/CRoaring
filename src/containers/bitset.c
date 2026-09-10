@@ -357,27 +357,136 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
 
 #if defined(CROARING_USERVV)
 
+#ifndef CROARING_RVV_NOCARD_LMUL
+#define CROARING_RVV_NOCARD_LMUL 1
+#endif
+
+#if CROARING_RVV_NOCARD_LMUL == 1
+
+#define CROARING_RVV_U64_T vuint64m1_t
+
+#define CROARING_RVV_SETVL(avl) \
+    __riscv_vsetvl_e64m1((avl))
+
+#define CROARING_RVV_LOAD(p, vl) \
+    __riscv_vle64_v_u64m1((p), (vl))
+
+#define CROARING_RVV_STORE(p, v, vl) \
+    __riscv_vse64_v_u64m1((p), (v), (vl))
+
 #define CROARING_RVV_OP_and(a, b, vl) \
     __riscv_vand_vv_u64m1((a), (b), (vl))
 
-#define CROARING_RVV_OP_intersection(a, b, vl) \
-    CROARING_RVV_OP_and((a), (b), (vl))
-
 #define CROARING_RVV_OP_or(a, b, vl) \
     __riscv_vor_vv_u64m1((a), (b), (vl))
-
-#define CROARING_RVV_OP_union(a, b, vl) \
-    CROARING_RVV_OP_or((a), (b), (vl))
 
 #define CROARING_RVV_OP_xor(a, b, vl) \
     __riscv_vxor_vv_u64m1((a), (b), (vl))
 
 #define CROARING_RVV_OP_andnot(a, b, vl) \
-    __riscv_vand_vv_u64m1(               \
-        (a),                              \
-        __riscv_vnot_v_u64m1((b), (vl)), \
+    __riscv_vand_vv_u64m1(              \
+        (a),                             \
+        __riscv_vnot_v_u64m1((b), (vl)),\
         (vl))
 
+#elif CROARING_RVV_NOCARD_LMUL == 2
+
+#define CROARING_RVV_U64_T vuint64m2_t
+
+#define CROARING_RVV_SETVL(avl) \
+    __riscv_vsetvl_e64m2((avl))
+
+#define CROARING_RVV_LOAD(p, vl) \
+    __riscv_vle64_v_u64m2((p), (vl))
+
+#define CROARING_RVV_STORE(p, v, vl) \
+    __riscv_vse64_v_u64m2((p), (v), (vl))
+
+#define CROARING_RVV_OP_and(a, b, vl) \
+    __riscv_vand_vv_u64m2((a), (b), (vl))
+
+#define CROARING_RVV_OP_or(a, b, vl) \
+    __riscv_vor_vv_u64m2((a), (b), (vl))
+
+#define CROARING_RVV_OP_xor(a, b, vl) \
+    __riscv_vxor_vv_u64m2((a), (b), (vl))
+
+#define CROARING_RVV_OP_andnot(a, b, vl) \
+    __riscv_vand_vv_u64m2(              \
+        (a),                             \
+        __riscv_vnot_v_u64m2((b), (vl)),\
+        (vl))
+
+#elif CROARING_RVV_NOCARD_LMUL == 4
+
+#define CROARING_RVV_U64_T vuint64m4_t
+
+#define CROARING_RVV_SETVL(avl) \
+    __riscv_vsetvl_e64m4((avl))
+
+#define CROARING_RVV_LOAD(p, vl) \
+    __riscv_vle64_v_u64m4((p), (vl))
+
+#define CROARING_RVV_STORE(p, v, vl) \
+    __riscv_vse64_v_u64m4((p), (v), (vl))
+
+#define CROARING_RVV_OP_and(a, b, vl) \
+    __riscv_vand_vv_u64m4((a), (b), (vl))
+
+#define CROARING_RVV_OP_or(a, b, vl) \
+    __riscv_vor_vv_u64m4((a), (b), (vl))
+
+#define CROARING_RVV_OP_xor(a, b, vl) \
+    __riscv_vxor_vv_u64m4((a), (b), (vl))
+
+#define CROARING_RVV_OP_andnot(a, b, vl) \
+    __riscv_vand_vv_u64m4(              \
+        (a),                             \
+        __riscv_vnot_v_u64m4((b), (vl)),\
+        (vl))
+
+#elif CROARING_RVV_NOCARD_LMUL == 8
+
+#define CROARING_RVV_U64_T vuint64m8_t
+
+#define CROARING_RVV_SETVL(avl) \
+    __riscv_vsetvl_e64m8((avl))
+
+#define CROARING_RVV_LOAD(p, vl) \
+    __riscv_vle64_v_u64m8((p), (vl))
+
+#define CROARING_RVV_STORE(p, v, vl) \
+    __riscv_vse64_v_u64m8((p), (v), (vl))
+
+#define CROARING_RVV_OP_and(a, b, vl) \
+    __riscv_vand_vv_u64m8((a), (b), (vl))
+
+#define CROARING_RVV_OP_or(a, b, vl) \
+    __riscv_vor_vv_u64m8((a), (b), (vl))
+
+#define CROARING_RVV_OP_xor(a, b, vl) \
+    __riscv_vxor_vv_u64m8((a), (b), (vl))
+
+#define CROARING_RVV_OP_andnot(a, b, vl) \
+    __riscv_vand_vv_u64m8(              \
+        (a),                             \
+        __riscv_vnot_v_u64m8((b), (vl)),\
+        (vl))
+
+#else
+#error "Unsupported CROARING_RVV_NOCARD_LMUL"
+#endif
+
+#define CROARING_RVV_OP_intersection(a, b, vl) \
+    CROARING_RVV_OP_and((a), (b), (vl))
+
+#define CROARING_RVV_OP_union(a, b, vl) \
+    CROARING_RVV_OP_or((a), (b), (vl))
+
+/*
+ * Mask macros keep their existing implementation.
+ * Do NOT make them depend on CROARING_RVV_NOCARD_LMUL.
+ */
 #define CROARING_RVV_MOP_and(ma, mb, vl) \
     __riscv_vmand_mm_b1((ma), (mb), (vl))
 
@@ -394,8 +503,10 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     __riscv_vmxor_mm_b1((ma), (mb), (vl))
 
 #define CROARING_RVV_MOP_andnot(ma, mb, vl) \
-    __riscv_vmandn_mm_b1(ma,mb,vl)
+    __riscv_vmandn_mm_b1((ma), (mb), (vl))
+
 #endif
+
 
 #if CROARING_IS_X64
 
@@ -1001,39 +1112,44 @@ int bitset_container_##opname(const bitset_container_t *src_1,            \
                                                                             \
     dst->cardinality = sum;                                                \
     return dst->cardinality;                                               \
-}
+}                                                                  \
                                                           \
                                                                          \
-int bitset_container_##opname##_nocard(const bitset_container_t *src_1,   \
-                                       const bitset_container_t *src_2,   \
-                                       bitset_container_t *dst) {         \
-    const uint64_t * __restrict__ words_1 = src_1->words;                 \
-    const uint64_t * __restrict__ words_2 = src_2->words;                 \
-    uint64_t *out = dst->words;                                           \
-    size_t n = BITSET_CONTAINER_SIZE_IN_WORDS;                            \
-                                                                          \
-    while (n != 0) {                                                      \
-        size_t vl = __riscv_vsetvl_e64m1(n);                              \
-                                                                          \
-        vuint64m1_t va =                                                  \
-            __riscv_vle64_v_u64m1(words_1, vl);                          \
-        vuint64m1_t vb =                                                  \
-            __riscv_vle64_v_u64m1(words_2, vl);                          \
-                                                                          \
-        vuint64m1_t vr =                                                  \
-            CROARING_RVV_OP_##opname(va, vb, vl);                          \
-                                                                          \
-        __riscv_vse64_v_u64m1(out, vr, vl);                              \
-                                                                          \
-        words_1 += vl;                                                     \
-        words_2 += vl;                                                     \
-        out += vl;                                                         \
-        n -= vl;                                                           \
+int bitset_container_##opname##_nocard(                                  \
+        const bitset_container_t *src_1,                                \
+        const bitset_container_t *src_2,                                \
+        bitset_container_t *dst) {                                      \
+                                                                         \
+    const uint64_t *__restrict__ words_1 = src_1->words;                 \
+    const uint64_t *__restrict__ words_2 = src_2->words;                 \
+    uint64_t *out = dst->words;                                          \
+                                                                         \
+    size_t words_remaining = BITSET_CONTAINER_SIZE_IN_WORDS;             \
+                                                                         \
+    while (words_remaining != 0) {                                       \
+        size_t vl = CROARING_RVV_SETVL(words_remaining);                 \
+                                                                         \
+        CROARING_RVV_U64_T va =                                          \
+            CROARING_RVV_LOAD(words_1, vl);                              \
+                                                                         \
+        CROARING_RVV_U64_T vb =                                          \
+            CROARING_RVV_LOAD(words_2, vl);                              \
+                                                                         \
+        CROARING_RVV_U64_T vr =                                          \
+            CROARING_RVV_OP_##opname(va, vb, vl);                        \
+                                                                         \
+        CROARING_RVV_STORE(out, vr, vl);                                 \
+                                                                         \
+        words_1 += vl;                                                    \
+        words_2 += vl;                                                    \
+        out += vl;                                                        \
+        words_remaining -= vl;                                           \
     }                                                                     \
-                                                                          \
+                                                                         \
     dst->cardinality = BITSET_UNKNOWN_CARDINALITY;                        \
-    return dst->cardinality;                                            \
-}                                                                       \
+    return dst->cardinality;                                              \
+}                                                                         \
+                                                                      \
                                                                          \
 int bitset_container_##opname##_justcard(const bitset_container_t *src_1, \
                               const bitset_container_t *src_2) {          \
