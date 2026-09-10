@@ -327,29 +327,13 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
 #elif defined(CROARING_USERVV)
 int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     const uint64_t *words = bitset->words;
-    const uint8_t *p = (const uint8_t *)words;
-
-    size_t bits_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * 64;
-    size_t vlmax =__riscv_vsetvlmax_e8m8();
-    uint64_t sum = 0;
-
-    while (bits_remaining != 0) {
-        size_t avl =
-          bits_remaining < vlmax ? bits_remaining : vlmax;
-
-        size_t vl =
-            __riscv_vsetvl_e8m8(avl);
-
-        vbool1_t mask =
-            __riscv_vlm_v_b1(p, vl);
-
-        sum +=
-            __riscv_vcpop_m_b1(mask, vl);
-
-        p += vl / 8;
-        bits_remaining -= vl;
+    int32_t sum = 0;
+    for (int i = 0; i < BITSET_CONTAINER_SIZE_IN_WORDS; i += 4) {
+        sum += roaring_hamming(words[i]);
+        sum += roaring_hamming(words[i + 1]);
+        sum += roaring_hamming(words[i + 2]);
+        sum += roaring_hamming(words[i + 3]);
     }
-
     return sum;
 }
 
@@ -960,31 +944,65 @@ int bitset_container_##opname##_justcard(const bitset_container_t *src_1,     \
 int bitset_container_##opname(const bitset_container_t *src_1,            \
                               const bitset_container_t *src_2,            \
                               bitset_container_t *dst) {                  \
-    const uint64_t * __restrict__ words_1 = src_1->words;                 \
-    const uint64_t * __restrict__ words_2 = src_2->words;                 \
-    const uint8_t *p1 = (const uint8_t *)words_1;                    \
-    const uint8_t *p2 = (const uint8_t *)words_2;                    \
-    uint8_t *out = (uint8_t *)dst->words;                                           \
-    size_t bits_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * 64;          \
-    size_t vlmax =__riscv_vsetvlmax_e8m8();                               \
-    int32_t sum = 0;                                                      \
-    while (bits_remaining != 0) {                                         \
-        size_t avl = bits_remaining < vlmax ? bits_remaining : vlmax;               \
-        size_t vl = __riscv_vsetvl_e8m8(avl);                             \
-        vbool1_t ma = __riscv_vlm_v_b1(p1, vl);                           \
-        vbool1_t mb = __riscv_vlm_v_b1(p2, vl);                           \
-        vbool1_t mr = CROARING_RVV_MOP_##opname(ma,mb,vl);                  \
-        sum += (int32_t)__riscv_vcpop_m_b1(mr, vl);                    \
-        __riscv_vsm_v_b1(out, mr, vl);                              \
-        size_t bytes = vl / 8;                         \
-        p1 += bytes;                                \
-        p2 += bytes;                               \
-        out += bytes;                               \
-        bits_remaining -= vl;                              \
-    }                                                 \                                          
-    dst->cardinality = sum;                        \
-    return dst->cardinality;                                             \
-}                                                                         \
+    const uint64_t *__restrict__ words_1 = src_1->words;                  \
+    const uint64_t *__restrict__ words_2 = src_2->words;                  \
+    uint64_t *out = dst->words;                                           \
+                                                                            \
+    /*                                                                    \
+     * Hybrid RVV + scalar cardinality.                                   \
+     *                                                                     \
+     * Phase 1: RVV performs the bitwise operation and stores dst.         \
+     *                                                                     \
+     * X60 VLEN=256, e64,m1 => 4 uint64_t words per full vector.          \
+     */                                                                    \
+    size_t words_remaining = BITSET_CONTAINER_SIZE_IN_WORDS;              \
+                                                                            \
+    while (words_remaining != 0) {                                        \
+        size_t vl = __riscv_vsetvl_e64m1(words_remaining);                \
+                                                                            \
+        vuint64m1_t va =                                                  \
+            __riscv_vle64_v_u64m1(words_1, vl);                           \
+                                                                            \
+        vuint64m1_t vb =                                                  \
+            __riscv_vle64_v_u64m1(words_2, vl);                           \
+                                                                            \
+        vuint64m1_t vr =                                                  \
+            CROARING_RVV_OP_##opname(va, vb, vl);                         \
+                                                                            \
+        __riscv_vse64_v_u64m1(out, vr, vl);                               \
+                                                                            \
+        words_1 += vl;                                                     \
+        words_2 += vl;                                                     \
+        out += vl;                                                         \
+        words_remaining -= vl;                                            \
+    }                                                                      \
+                                                                            \
+    /*                                                                    \
+     * Phase 2: scalar cardinality.                                       \
+     *                                                                     \
+     * Keep the same 4-way-unrolled structure as CRoaring's scalar         \
+     * cardinality path. With Zbb enabled, roaring_hamming() can compile   \
+     * to scalar cpop on RISC-V.                                          \
+     *                                                                     \
+     * dst has just been written, so its 8 KiB buffer should normally      \
+     * still be cache-hot.                                                 \
+     */                                                                    \
+    const uint64_t *result = dst->words;                                   \
+    int32_t sum = 0;                                                       \
+                                                                            \
+    for (size_t i = 0;                                                     \
+         i < BITSET_CONTAINER_SIZE_IN_WORDS;                               \
+         i += 4) {                                                         \
+        sum += roaring_hamming(result[i]);                                 \
+        sum += roaring_hamming(result[i + 1]);                             \
+        sum += roaring_hamming(result[i + 2]);                             \
+        sum += roaring_hamming(result[i + 3]);                             \
+    }                                                                      \
+                                                                            \
+    dst->cardinality = sum;                                                \
+    return dst->cardinality;                                               \
+}
+                                                          \
                                                                          \
 int bitset_container_##opname##_nocard(const bitset_container_t *src_1,   \
                                        const bitset_container_t *src_2,   \
