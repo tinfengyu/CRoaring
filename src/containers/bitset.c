@@ -323,7 +323,6 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     return vgetq_lane_u64(n, 0) + vgetq_lane_u64(n, 1);
 }
 
-
 #elif defined(CROARING_USERVV)
 
 int bitset_container_compute_cardinality(
@@ -335,173 +334,330 @@ int bitset_container_compute_cardinality(
     size_t bytes_remaining =
         BITSET_CONTAINER_SIZE_IN_WORDS * sizeof(uint64_t);
 
+    uint32_t sum = 0;
+
     /*
-     * SWAR v2
+     * SWAR v3:
      *
-     * e8,m8:
-     *   X60 VLEN=256 -> 256 bytes / iteration
+     *   e8,m4
+     *   2-way unrolling
+     *   two independent u8 accumulators
      *
-     * Each byte after SWAR contains a value in [0, 8].
+     * X60 / VLEN=256:
      *
-     * Accumulate at most 16 iterations into uint8_t lanes:
+     *   e8,m4 VLMAX = 128 bytes
+     *   two vectors = 256 bytes / unrolled iteration
+     *
+     * Same amount of data per outer iteration as m8/u1,
+     * but with two independent dependency chains.
+     */
+
+    /*
+     * Limit the working VL so that one u8 -> u16 reduction
+     * can never overflow.
+     *
+     * 4096 bytes * 8 bits = 32768
+     *
+     * which safely fits in uint16_t.
+     */
+    const size_t reduce_byte_limit = 4096;
+
+    size_t work_vl =
+        __riscv_vsetvl_e8m4(reduce_byte_limit);
+
+    /*
+     * Each byte lane contributes at most 8.
+     *
+     * We also cap each accumulator to at most 16 additions:
      *
      *   16 * 8 = 128
      *
-     * so the u8 accumulator cannot overflow.
+     * so the u8 accumulator itself cannot overflow.
      */
-    const size_t vlmax =
-        __riscv_vsetvlmax_e8m8();
+    size_t max_pairs =
+        reduce_byte_limit / work_vl;
+
+    if (max_pairs > 16) {
+        max_pairs = 16;
+    }
+
+    if (max_pairs == 0) {
+        max_pairs = 1;
+    }
 
     /*
-     * vwredsumu u8 -> u16 has a uint16_t-wide reduction result.
-     *
-     * Limit one reduction batch to at most 8191 input bytes:
-     *
-     *   8191 * 8 = 65528 < 65536
-     *
-     * so the partial reduction cannot overflow uint16_t.
+     * Main 2-way-unrolled path.
      */
-    const size_t max_batch_bytes =
-        UINT16_MAX / 8u;       /* 8191 */
+    while (bytes_remaining >= 2 * work_vl) {
 
-    const unsigned max_batch_iters = 16;
+        vuint8m4_t acc0 =
+            __riscv_vmv_v_x_u8m4(
+                0, work_vl);
 
-    vuint8m8_t acc =
-        __riscv_vmv_v_x_u8m8(0, vlmax);
+        vuint8m4_t acc1 =
+            __riscv_vmv_v_x_u8m4(
+                0, work_vl);
 
-    size_t batch_bytes = 0;
-    unsigned batch_iters = 0;
+        size_t pairs = 0;
 
-    uint32_t sum = 0;
+        while (pairs < max_pairs &&
+               bytes_remaining >= 2 * work_vl) {
 
+            /*
+             * Load two independent blocks.
+             */
+            vuint8m4_t v0 =
+                __riscv_vle8_v_u8m4(
+                    p, work_vl);
+
+            vuint8m4_t v1 =
+                __riscv_vle8_v_u8m4(
+                    p + work_vl, work_vl);
+
+            vuint8m4_t t0;
+            vuint8m4_t t1;
+
+            /*
+             * ------------------------------------------------
+             * SWAR stage 1
+             *
+             * x = x - ((x >> 1) & 0x55)
+             * ------------------------------------------------
+             *
+             * Keep the two chains interleaved to expose ILP.
+             */
+
+            t0 =
+                __riscv_vsrl_vx_u8m4(
+                    v0, 1, work_vl);
+
+            t1 =
+                __riscv_vsrl_vx_u8m4(
+                    v1, 1, work_vl);
+
+            t0 =
+                __riscv_vand_vx_u8m4(
+                    t0, 0x55, work_vl);
+
+            t1 =
+                __riscv_vand_vx_u8m4(
+                    t1, 0x55, work_vl);
+
+            v0 =
+                __riscv_vsub_vv_u8m4(
+                    v0, t0, work_vl);
+
+            v1 =
+                __riscv_vsub_vv_u8m4(
+                    v1, t1, work_vl);
+
+            /*
+             * ------------------------------------------------
+             * SWAR stage 2
+             *
+             * x = (x & 0x33)
+             *   + ((x >> 2) & 0x33)
+             * ------------------------------------------------
+             */
+
+            t0 =
+                __riscv_vsrl_vx_u8m4(
+                    v0, 2, work_vl);
+
+            t1 =
+                __riscv_vsrl_vx_u8m4(
+                    v1, 2, work_vl);
+
+            v0 =
+                __riscv_vand_vx_u8m4(
+                    v0, 0x33, work_vl);
+
+            v1 =
+                __riscv_vand_vx_u8m4(
+                    v1, 0x33, work_vl);
+
+            t0 =
+                __riscv_vand_vx_u8m4(
+                    t0, 0x33, work_vl);
+
+            t1 =
+                __riscv_vand_vx_u8m4(
+                    t1, 0x33, work_vl);
+
+            v0 =
+                __riscv_vadd_vv_u8m4(
+                    v0, t0, work_vl);
+
+            v1 =
+                __riscv_vadd_vv_u8m4(
+                    v1, t1, work_vl);
+
+            /*
+             * ------------------------------------------------
+             * SWAR stage 3
+             *
+             * x = (x + (x >> 4)) & 0x0f
+             * ------------------------------------------------
+             */
+
+            t0 =
+                __riscv_vsrl_vx_u8m4(
+                    v0, 4, work_vl);
+
+            t1 =
+                __riscv_vsrl_vx_u8m4(
+                    v1, 4, work_vl);
+
+            v0 =
+                __riscv_vadd_vv_u8m4(
+                    v0, t0, work_vl);
+
+            v1 =
+                __riscv_vadd_vv_u8m4(
+                    v1, t1, work_vl);
+
+            v0 =
+                __riscv_vand_vx_u8m4(
+                    v0, 0x0f, work_vl);
+
+            v1 =
+                __riscv_vand_vx_u8m4(
+                    v1, 0x0f, work_vl);
+
+            /*
+             * Two independent accumulators.
+             *
+             * Important:
+             * no widening accumulation in the hot loop.
+             */
+            acc0 =
+                __riscv_vadd_vv_u8m4(
+                    acc0, v0, work_vl);
+
+            acc1 =
+                __riscv_vadd_vv_u8m4(
+                    acc1, v1, work_vl);
+
+            p += 2 * work_vl;
+            bytes_remaining -= 2 * work_vl;
+
+            ++pairs;
+        }
+
+        /*
+         * Reduce the two accumulators separately.
+         *
+         * Each accumulator covers at most 4096 bytes,
+         * therefore:
+         *
+         *   max sum <= 4096 * 8 = 32768
+         *
+         * and u16 is sufficient.
+         */
+        vuint16m1_t zero =
+            __riscv_vmv_v_x_u16m1(
+                0, 1);
+
+        vuint16m1_t reduced0 =
+            __riscv_vwredsumu_vs_u8m4_u16m1(
+                acc0, zero, work_vl);
+
+        vuint16m1_t reduced1 =
+            __riscv_vwredsumu_vs_u8m4_u16m1(
+                acc1, zero, work_vl);
+
+        sum +=
+            __riscv_vmv_x_s_u16m1_u16(
+                reduced0);
+
+        sum +=
+            __riscv_vmv_x_s_u16m1_u16(
+                reduced1);
+    }
+
+    /*
+     * Tail path.
+     *
+     * Normally X60 has no tail:
+     *
+     *   8192 / (2 * 128) = 32
+     *
+     * exactly.
+     *
+     * Keep this for VLEN-agnostic correctness.
+     */
     while (bytes_remaining != 0) {
 
-        /*
-         * Do not let one reduction batch exceed the u16
-         * reduction range.
-         */
-        size_t batch_room =
-            max_batch_bytes - batch_bytes;
-
         size_t avl =
-            bytes_remaining < batch_room
+            bytes_remaining < reduce_byte_limit
                 ? bytes_remaining
-                : batch_room;
+                : reduce_byte_limit;
 
         size_t vl =
-            __riscv_vsetvl_e8m8(avl);
+            __riscv_vsetvl_e8m4(avl);
 
-        vuint8m8_t v =
-            __riscv_vle8_v_u8m8(p, vl);
+        vuint8m4_t v =
+            __riscv_vle8_v_u8m4(
+                p, vl);
 
-        vuint8m8_t t;
+        vuint8m4_t t;
 
-        /*
-         * Byte-wise SWAR popcount:
-         *
-         * x = x - ((x >> 1) & 0x55);
-         */
         t =
-            __riscv_vsrl_vx_u8m8(
+            __riscv_vsrl_vx_u8m4(
                 v, 1, vl);
 
         t =
-            __riscv_vand_vx_u8m8(
+            __riscv_vand_vx_u8m4(
                 t, 0x55, vl);
 
         v =
-            __riscv_vsub_vv_u8m8(
+            __riscv_vsub_vv_u8m4(
                 v, t, vl);
 
-        /*
-         * x = (x & 0x33)
-         *   + ((x >> 2) & 0x33);
-         */
+
         t =
-            __riscv_vsrl_vx_u8m8(
+            __riscv_vsrl_vx_u8m4(
                 v, 2, vl);
 
         t =
-            __riscv_vand_vx_u8m8(
+            __riscv_vand_vx_u8m4(
                 t, 0x33, vl);
 
         v =
-            __riscv_vand_vx_u8m8(
+            __riscv_vand_vx_u8m4(
                 v, 0x33, vl);
 
         v =
-            __riscv_vadd_vv_u8m8(
+            __riscv_vadd_vv_u8m4(
                 v, t, vl);
 
-        /*
-         * x = (x + (x >> 4)) & 0x0f;
-         */
+
         t =
-            __riscv_vsrl_vx_u8m8(
+            __riscv_vsrl_vx_u8m4(
                 v, 4, vl);
 
         v =
-            __riscv_vadd_vv_u8m8(
+            __riscv_vadd_vv_u8m4(
                 v, t, vl);
 
         v =
-            __riscv_vand_vx_u8m8(
+            __riscv_vand_vx_u8m4(
                 v, 0x0f, vl);
 
-        /*
-         * Important difference from v1:
-         *
-         * Do NOT widen every iteration.
-         * Keep an 8-bit vector accumulator.
-         *
-         * _tu preserves accumulator lanes outside the
-         * current VL, which matters for a possible tail.
-         */
-        acc =
-            __riscv_vadd_vv_u8m8_tu(
-                acc, acc, v, vl);
+        vuint16m1_t zero =
+            __riscv_vmv_v_x_u16m1(
+                0, 1);
+
+        vuint16m1_t reduced =
+            __riscv_vwredsumu_vs_u8m4_u16m1(
+                v, zero, vl);
+
+        sum +=
+            __riscv_vmv_x_s_u16m1_u16(
+                reduced);
 
         p += vl;
         bytes_remaining -= vl;
-
-        batch_bytes += vl;
-        ++batch_iters;
-
-        /*
-         * Periodically flush the u8 accumulator.
-         *
-         * On X60:
-         *
-         *   e8,m8 VLMAX = 256 bytes
-         *   16 iterations = 4096 bytes
-         *
-         * so the 8192-byte bitset needs two reductions.
-         */
-        if (batch_iters == max_batch_iters ||
-            batch_bytes == max_batch_bytes ||
-            bytes_remaining == 0) {
-
-            vuint16m1_t zero =
-                __riscv_vmv_v_x_u16m1(
-                    0, 1);
-
-            vuint16m1_t reduced =
-                __riscv_vwredsumu_vs_u8m8_u16m1(
-                    acc, zero, vlmax);
-
-            sum +=
-                __riscv_vmv_x_s_u16m1_u16(
-                    reduced);
-
-            batch_bytes = 0;
-            batch_iters = 0;
-
-            if (bytes_remaining != 0) {
-                acc =
-                    __riscv_vmv_v_x_u8m8(
-                        0, vlmax);
-            }
-        }
     }
 
     return (int)sum;
