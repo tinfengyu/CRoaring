@@ -325,56 +325,188 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
 
 
 #elif defined(CROARING_USERVV)
-int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
-    const uint64_t *words = bitset->words;
-    const uint8_t *p = (const uint8_t *)words;
 
-    size_t bytes_remaining = BITSET_CONTAINER_SIZE_IN_WORDS * sizeof(uint64_t);
-    size_t vlmax = __riscv_vsetvlmax_e8m4();
-    size_t vl_acc =__riscv_vsetvlmax_e16m8();
-    vuint16m8_t acc =
-        __riscv_vmv_v_x_u16m8(0, vl_acc);
-    
+int bitset_container_compute_cardinality(
+        const bitset_container_t *bitset) {
+
+    const uint8_t *p =
+        (const uint8_t *)bitset->words;
+
+    size_t bytes_remaining =
+        BITSET_CONTAINER_SIZE_IN_WORDS * sizeof(uint64_t);
+
+    /*
+     * SWAR v2
+     *
+     * e8,m8:
+     *   X60 VLEN=256 -> 256 bytes / iteration
+     *
+     * Each byte after SWAR contains a value in [0, 8].
+     *
+     * Accumulate at most 16 iterations into uint8_t lanes:
+     *
+     *   16 * 8 = 128
+     *
+     * so the u8 accumulator cannot overflow.
+     */
+    const size_t vlmax =
+        __riscv_vsetvlmax_e8m8();
+
+    /*
+     * vwredsumu u8 -> u16 has a uint16_t-wide reduction result.
+     *
+     * Limit one reduction batch to at most 8191 input bytes:
+     *
+     *   8191 * 8 = 65528 < 65536
+     *
+     * so the partial reduction cannot overflow uint16_t.
+     */
+    const size_t max_batch_bytes =
+        UINT16_MAX / 8u;       /* 8191 */
+
+    const unsigned max_batch_iters = 16;
+
+    vuint8m8_t acc =
+        __riscv_vmv_v_x_u8m8(0, vlmax);
+
+    size_t batch_bytes = 0;
+    unsigned batch_iters = 0;
+
+    uint32_t sum = 0;
+
     while (bytes_remaining != 0) {
+
+        /*
+         * Do not let one reduction batch exceed the u16
+         * reduction range.
+         */
+        size_t batch_room =
+            max_batch_bytes - batch_bytes;
+
+        size_t avl =
+            bytes_remaining < batch_room
+                ? bytes_remaining
+                : batch_room;
+
         size_t vl =
-            __riscv_vsetvl_e8m4(bytes_remaining);
+            __riscv_vsetvl_e8m8(avl);
 
-        vuint8m4_t v =
-            __riscv_vle8_v_u8m4(p, vl);
+        vuint8m8_t v =
+            __riscv_vle8_v_u8m8(p, vl);
 
-        vuint8m4_t t;
+        vuint8m8_t t;
 
-        t = __riscv_vsrl_vx_u8m4(v, 1, vl);
-        t = __riscv_vand_vx_u8m4(t, 0x55, vl);
-        v = __riscv_vsub_vv_u8m4(v, t, vl);
+        /*
+         * Byte-wise SWAR popcount:
+         *
+         * x = x - ((x >> 1) & 0x55);
+         */
+        t =
+            __riscv_vsrl_vx_u8m8(
+                v, 1, vl);
 
-        t = __riscv_vsrl_vx_u8m4(v, 2, vl);
-        t = __riscv_vand_vx_u8m4(t, 0x33, vl);
+        t =
+            __riscv_vand_vx_u8m8(
+                t, 0x55, vl);
 
-        v = __riscv_vand_vx_u8m4(v, 0x33, vl);
-        v = __riscv_vadd_vv_u8m4(v, t, vl);
+        v =
+            __riscv_vsub_vv_u8m8(
+                v, t, vl);
 
-        t = __riscv_vsrl_vx_u8m4(v, 4, vl);
-        v = __riscv_vadd_vv_u8m4(v, t, vl);
-        v = __riscv_vand_vx_u8m4(v, 0x0f, vl);
+        /*
+         * x = (x & 0x33)
+         *   + ((x >> 2) & 0x33);
+         */
+        t =
+            __riscv_vsrl_vx_u8m8(
+                v, 2, vl);
 
+        t =
+            __riscv_vand_vx_u8m8(
+                t, 0x33, vl);
+
+        v =
+            __riscv_vand_vx_u8m8(
+                v, 0x33, vl);
+
+        v =
+            __riscv_vadd_vv_u8m8(
+                v, t, vl);
+
+        /*
+         * x = (x + (x >> 4)) & 0x0f;
+         */
+        t =
+            __riscv_vsrl_vx_u8m8(
+                v, 4, vl);
+
+        v =
+            __riscv_vadd_vv_u8m8(
+                v, t, vl);
+
+        v =
+            __riscv_vand_vx_u8m8(
+                v, 0x0f, vl);
+
+        /*
+         * Important difference from v1:
+         *
+         * Do NOT widen every iteration.
+         * Keep an 8-bit vector accumulator.
+         *
+         * _tu preserves accumulator lanes outside the
+         * current VL, which matters for a possible tail.
+         */
         acc =
-            __riscv_vwaddu_wv_u16m8_tu(
+            __riscv_vadd_vv_u8m8_tu(
                 acc, acc, v, vl);
 
         p += vl;
         bytes_remaining -= vl;
+
+        batch_bytes += vl;
+        ++batch_iters;
+
+        /*
+         * Periodically flush the u8 accumulator.
+         *
+         * On X60:
+         *
+         *   e8,m8 VLMAX = 256 bytes
+         *   16 iterations = 4096 bytes
+         *
+         * so the 8192-byte bitset needs two reductions.
+         */
+        if (batch_iters == max_batch_iters ||
+            batch_bytes == max_batch_bytes ||
+            bytes_remaining == 0) {
+
+            vuint16m1_t zero =
+                __riscv_vmv_v_x_u16m1(
+                    0, 1);
+
+            vuint16m1_t reduced =
+                __riscv_vwredsumu_vs_u8m8_u16m1(
+                    acc, zero, vlmax);
+
+            sum +=
+                __riscv_vmv_x_s_u16m1_u16(
+                    reduced);
+
+            batch_bytes = 0;
+            batch_iters = 0;
+
+            if (bytes_remaining != 0) {
+                acc =
+                    __riscv_vmv_v_x_u8m8(
+                        0, vlmax);
+            }
+        }
     }
-    vuint32m1_t zero =
-        __riscv_vmv_v_x_u32m1(0, 1);
 
-    vuint32m1_t reduced =
-        __riscv_vwredsumu_vs_u16m8_u32m1(acc, zero, vl_acc);
-
-    uint32_t sum =
-        __riscv_vmv_x_s_u32m1_u32(reduced);
-    return sum;
+    return (int)sum;
 }
+
 
 #else  // CROARING_IS_X64
 
